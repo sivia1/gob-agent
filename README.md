@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # gob-agent
 =======
 # GOB 🤖 — Government Job Agent
