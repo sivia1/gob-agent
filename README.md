@@ -268,5 +268,4 @@ Once everything is working on Telegram, you can switch to WhatsApp:
 
 ---
 
-*GOB — Built with ❤️ for Indian students who don't want to miss that one notification.*
 >>>>>>> ebc9a57 (Initial commit: GOB Agent Core)
