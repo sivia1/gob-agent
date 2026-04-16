@@ -1,0 +1,54 @@
+version: '3.8'
+
+# GOB - Government Job Agent
+# Runs n8n (automation brain) + FastAPI (site manager backend)
+
+services:
+
+  # ─── The Automation Brain (n8n) ───────────────────────────────────────────
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: gob_n8n
+    restart: always
+    ports:
+      - "5678:5678"                   # Access n8n at http://localhost:5678
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=Asia/Kolkata  # Change if you're not in IST
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD}
+      - N8N_LOG_LEVEL=warn
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - backend
+    networks:
+      - gob_network
+
+  # ─── The Site Manager (FastAPI) ───────────────────────────────────────────
+  backend:
+    build: ./backend
+    container_name: gob_backend
+    restart: always
+    ports:
+      - "8000:8000"                   # API docs at http://localhost:8000/docs
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app                # Live reload while developing
+      - gob_db:/app/data              # Persistent SQLite database
+    networks:
+      - gob_network
+
+# ─── Volumes & Network ─────────────────────────────────────────────────────
+volumes:
+  n8n_data:
+  gob_db:
+
+networks:
+  gob_network:
+    driver: bridge

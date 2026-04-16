@@ -1,0 +1,364 @@
+{
+  "name": "GOB - Government Job Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "f1a2b3c4-0001-0001-0001-000000000001",
+      "name": "Daily 9AM Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300],
+      "notes": "Runs every day at 9:00 AM IST. Change the cron to run more often e.g. '0 */6 * * *' = every 6 hours."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://backend:8000/sites",
+        "options": {}
+      },
+      "id": "f1a2b3c4-0002-0002-0002-000000000002",
+      "name": "Get Watched Sites",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300],
+      "notes": "Fetches the list of active sites from GOB backend (FastAPI)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// The backend returns an array of site objects.\n// We turn each site into its own n8n item so splitInBatches works correctly.\n\nconst sites = $input.first().json;\n\n// Handle both array response and object-with-list response\nconst siteList = Array.isArray(sites) ? sites : (sites.sites || []);\n\nreturn siteList.map(site => ({ json: site }));"
+      },
+      "id": "f1a2b3c4-0003-0003-0003-000000000003",
+      "name": "Format Sites List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "f1a2b3c4-0004-0004-0004-000000000004",
+      "name": "One Site at a Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.firecrawl.dev/v1/scrape",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $vars.FIRECRAWL_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"formats\": [\"markdown\"],\n  \"onlyMainContent\": true,\n  \"timeout\": 30000\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "f1a2b3c4-0005-0005-0005-000000000005",
+      "name": "Scrape with Firecrawl",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1080, 300],
+      "notes": "Firecrawl scrapes the site and gives us clean Markdown text. Handles JS-heavy sites automatically."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge scraped content with original site info\nconst site = $('One Site at a Time').first().json;\nconst firecrawlResponse = $input.first().json;\n\nconst markdown = firecrawlResponse?.data?.markdown || \n                 firecrawlResponse?.markdown || \n                 '';\n\nif (!markdown || markdown.length < 50) {\n  return [{\n    json: {\n      ...site,\n      markdown: '',\n      scrape_error: true,\n      error_msg: 'Firecrawl returned empty content'\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    ...site,\n    markdown: markdown.slice(0, 8000), // Keep first 8000 chars (Gemini limit safety)\n    scrape_error: false\n  }\n}];"
+      },
+      "id": "f1a2b3c4-0006-0006-0006-000000000006",
+      "name": "Merge Scraped Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-scrape",
+              "leftValue": "={{ $json.scrape_error }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f1a2b3c4-0007-0007-0007-000000000007",
+      "name": "Scrape OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1520, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={{ $vars.GEMINI_API_KEY }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"You are GOB, an intelligent Government Job Notification Agent for Indian students.\\n\\nSite Name: {{ $json.name }}\\nSite URL: {{ $json.url }}\\nKeywords to watch: {{ $json.keywords.join(', ') }}\\n\\n--- SCRAPED CONTENT START ---\\n{{ $json.markdown }}\\n--- SCRAPED CONTENT END ---\\n\\nYour task:\\n1. Look carefully for any NEW exam notifications, recruitment alerts, job openings, or important announcements.\\n2. Check if they match ANY of the keywords provided.\\n3. Check if an Indian B.Tech/Engineering student graduating in 2026 would find this useful (e.g. GATE, RBI Grade B, UPSC IES/IAS, SSC JE, PSU recruitment, campus placements via GATE score).\\n4. If you find something relevant:\\n   - Extract the title of the notification\\n   - Write a 2-3 sentence plain-English summary (no jargon)\\n   - Find the direct PDF link or page link if visible\\n   - Mark confidence as 'high', 'medium', or 'low'\\n5. If nothing relevant is found OR content is just navigation/ads, set relevant to false.\\n\\nIMPORTANT: Reply with ONLY this exact JSON (no markdown, no code blocks, just raw JSON):\\n{\\\"relevant\\\": true or false, \\\"confidence\\\": \\\"high\\\" or \\\"medium\\\" or \\\"low\\\", \\\"title\\\": \\\"short title\\\", \\\"summary\\\": \\\"2-3 sentence summary\\\", \\\"link\\\": \\\"url or null\\\", \\\"reason\\\": \\\"why relevant or not\\\"}\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"maxOutputTokens\": 500\n  }\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "f1a2b3c4-0008-0008-0008-000000000008",
+      "name": "Gemini AI Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1740, 200],
+      "notes": "Sends scraped content to Gemini 1.5 Flash for intelligent relevance analysis."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Gemini's response and extract the JSON analysis\nconst geminiResponse = $input.first().json;\nconst siteData = $('Merge Scraped Content').first().json;\n\nlet analysis;\ntry {\n  // Gemini returns: {candidates: [{content: {parts: [{text: '...'}]}}]}\n  const rawText = geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n  \n  // Strip any accidental markdown code fences\n  const cleaned = rawText.replace(/```json|```/g, '').trim();\n  analysis = JSON.parse(cleaned);\n} catch (e) {\n  // If parsing fails, flag it for manual review\n  analysis = {\n    relevant: true,\n    confidence: 'low',\n    title: 'Manual Review Required',\n    summary: 'GOB could not parse AI response. Please check the site manually.',\n    link: siteData.url,\n    reason: 'AI parsing error: ' + e.message\n  };\n}\n\nreturn [{\n  json: {\n    ...siteData,\n    analysis\n  }\n}];"
+      },
+      "id": "f1a2b3c4-0009-0009-0009-000000000009",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1960, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-relevant",
+              "leftValue": "={{ $json.analysis.relevant }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f1a2b3c4-0010-0010-0010-000000000010",
+      "name": "Is Relevant?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2180, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a nicely formatted Telegram message\nconst data = $input.first().json;\nconst analysis = data.analysis;\n\nconst confidenceEmoji = {\n  'high': '🟢',\n  'medium': '🟡',\n  'low': '🔴'\n}[analysis.confidence] || '⚪';\n\nconst lines = [\n  `🏛️ *GOB ALERT* - New Govt Notification!`,\n  ``,\n  `📌 *${analysis.title}*`,\n  ``,\n  `📋 *Summary:*`,\n  analysis.summary,\n  ``,\n  `🌐 *Source:* ${data.name}`,\n  `${confidenceEmoji} *Confidence:* ${analysis.confidence}`,\n];\n\nif (analysis.link && analysis.link !== 'null' && analysis.link !== null) {\n  lines.push(``);\n  lines.push(`🔗 *Link:* ${analysis.link}`);\n}\n\nlines.push(``);\nlines.push(`_Monitored by GOB 🤖 | ${new Date().toLocaleString('en-IN', {timeZone: 'Asia/Kolkata'})}_`);\n\nreturn [{\n  json: {\n    ...data,\n    telegram_message: lines.join('\\n')\n  }\n}];"
+      },
+      "id": "f1a2b3c4-0011-0011-0011-000000000011",
+      "name": "Format Telegram Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $vars.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": \"{{ $vars.TELEGRAM_CHAT_ID }}\",\n  \"text\": \"{{ $json.telegram_message }}\",\n  \"parse_mode\": \"Markdown\"\n}",
+        "options": {}
+      },
+      "id": "f1a2b3c4-0012-0012-0012-000000000012",
+      "name": "Send Telegram Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2620, 100],
+      "notes": "Sends the formatted alert to your Telegram bot/group"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8000/alerts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"site_id\": {{ $json.id }},\n  \"site_name\": \"{{ $json.name }}\",\n  \"title\": \"{{ $json.analysis.title }}\",\n  \"summary\": \"{{ $json.analysis.summary }}\",\n  \"link\": \"{{ $json.analysis.link || '' }}\",\n  \"confidence\": \"{{ $json.analysis.confidence }}\"\n}",
+        "options": {}
+      },
+      "id": "f1a2b3c4-0013-0013-0013-000000000013",
+      "name": "Log Alert to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2840, 100],
+      "notes": "Saves a record of every alert sent. View at http://localhost:8000/alerts"
+    },
+    {
+      "parameters": {},
+      "id": "f1a2b3c4-0014-0014-0014-000000000014",
+      "name": "Not Relevant - Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2400, 320],
+      "notes": "Nothing relevant found on this site today. No action taken."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $vars.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": \"{{ $vars.TELEGRAM_CHAT_ID }}\",\n  \"text\": \"⚠️ *GOB Scrape Error*\\n\\nCouldn't scrape: *{{ $json.name }}*\\nURL: {{ $json.url }}\\n\\n_Please check if the site is accessible._\",\n  \"parse_mode\": \"Markdown\"\n}",
+        "options": {}
+      },
+      "id": "f1a2b3c4-0015-0015-0015-000000000015",
+      "name": "Alert Scrape Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1740, 420],
+      "notes": "Notifies you when a site couldn't be scraped (so you can manually check)"
+    }
+  ],
+  "connections": {
+    "Daily 9AM Trigger": {
+      "main": [
+        [{ "node": "Get Watched Sites", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Watched Sites": {
+      "main": [
+        [{ "node": "Format Sites List", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format Sites List": {
+      "main": [
+        [{ "node": "One Site at a Time", "type": "main", "index": 0 }]
+      ]
+    },
+    "One Site at a Time": {
+      "main": [
+        [{ "node": "Scrape with Firecrawl", "type": "main", "index": 0 }]
+      ]
+    },
+    "Scrape with Firecrawl": {
+      "main": [
+        [{ "node": "Merge Scraped Content", "type": "main", "index": 0 }]
+      ]
+    },
+    "Merge Scraped Content": {
+      "main": [
+        [{ "node": "Scrape OK?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Scrape OK?": {
+      "main": [
+        [{ "node": "Gemini AI Analysis", "type": "main", "index": 0 }],
+        [{ "node": "Alert Scrape Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Gemini AI Analysis": {
+      "main": [
+        [{ "node": "Parse AI Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [{ "node": "Is Relevant?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is Relevant?": {
+      "main": [
+        [{ "node": "Format Telegram Message", "type": "main", "index": 0 }],
+        [{ "node": "Not Relevant - Skip", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format Telegram Message": {
+      "main": [
+        [{ "node": "Send Telegram Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Telegram Alert": {
+      "main": [
+        [{ "node": "Log Alert to Backend", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": [
+    { "name": "GOB", "createdAt": "2026-01-01T00:00:00.000Z" }
+  ]
+}
